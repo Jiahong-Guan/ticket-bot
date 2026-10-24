@@ -1,0 +1,23 @@
+{
+  "bot_name": "Hack N' Flag",
+  "dev_guild_id": 1562832771703902260,
+  "bot_owner_ids": [877760893356744744],
+  "activity": {
+    "type": "watching",
+    "name": "over Hack N' Flag 2026"
+  },
+  "embed_theme": {
+    "primary": "5865F2",
+    "success": "57F287",
+    "error": "ED4245",
+    "warning": "FEE75C",
+    "info": "5865F2"
+  },
+  "ticket_format": {
+    "open": "ticket-{number:04d}",
+    "closed": "closed-{number:04d}"
+  },
+  "max_open_tickets_per_user": 1,
+  "log_file": "logs/hacknflag.log",
+  "log_level": "INFO"
+}
