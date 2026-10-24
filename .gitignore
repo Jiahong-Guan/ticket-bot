@@ -221,5 +221,3 @@ __marimo__/
 
 *~
 db/*.json
-*.xlsx
-!data/NP-Overflow-HackIT-Signup-Template.xlsx
