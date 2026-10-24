@@ -10,14 +10,11 @@
     "primary": "5865F2",
     "success": "57F287",
     "error": "ED4245",
-    "warning": "FEE75C",
-    "info": "5865F2"
+    "warning": "FEE75C"
   },
   "ticket_format": {
     "open": "ticket-{number:04d}",
     "closed": "closed-{number:04d}"
   },
-  "max_open_tickets_per_user": 1,
-  "log_file": "logs/hacknflag.log",
-  "log_level": "INFO"
+  "max_open_tickets_per_user": 1
 }
