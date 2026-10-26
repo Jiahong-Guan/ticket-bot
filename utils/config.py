@@ -75,12 +75,14 @@ class Settings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     bot_name: str = "Ticket Bot"
+    dev_guild_id: int
     discord_token: str = Field(min_length=20, repr=False)
     log_level: str = "INFO"
     db_path: Path
     transcript_path: Path
     log_path: Path
     bot_owner_ids: list[int]
+    activity: dict[str, Any]
     embed_theme: EmbedTheme
     ticket_format: TicketFormat
     max_open_tickets_per_user: int
