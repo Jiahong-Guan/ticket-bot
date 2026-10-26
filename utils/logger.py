@@ -6,7 +6,7 @@ import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)-30s | %(message)s"
 _MAX_BYTES = 5 * 1024 * 1024
 _BACKUPS = 3
 _ROOT_NAME = "ticketbot"
