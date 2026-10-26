@@ -58,20 +58,22 @@ class TicketBot(commands.Bot):
     async def setup_hook(self) -> None:
         embeds.configure_theme(self.settings.embed_theme)
         await self.db.open()
-        self.log.info(
-            "Starting ticket bot v%s on host %s | db=%s | transcripts=%s",
-            VERSION,
-            host_name(),
-            self.settings.db_path,
-            self.settings.transcript_path,
-        )
+        self.log.info(f"Starting ticket bot v{VERSION} on host {host_name()} "
+                      f"| db={self.settings.db_path} "
+                      f"| transcripts={self.settings.transcript_path}")
         if not self.settings.bot_owner_ids:
             self.log.warning("bot_owner_ids is empty in config.json; owner-only commands are off")
 
         await self._register_persistent_views()
+
         await self._load_cogs()
+
+        guild = discord.Object(id=self.settings.dev_guild_id)
+
         try:
-            synced = await self.tree.sync()
+            self.tree.copy_global_to(guild=guild)
+            synced = await self.tree.sync(guild=guild)
+
         except discord.HTTPException:
             self.log.exception("Application command sync failed")
         else:
@@ -99,14 +101,23 @@ class TicketBot(commands.Bot):
             try:
                 await self.load_extension(extension)
             except Exception:
-                self.log.exception("Failed to load cog %s", extension)
+                self.log.exception(f"Failed to load cog {extension}")
                 self.failed_cogs.append(extension)
             else:
                 self.loaded_cogs.append(extension)
-                self.log.info("Loaded cog %s", extension)
+                self.log.info(f"Loaded cog {extension}")
         self.log.info(f"Cog load finished: {len(self.loaded_cogs)} loaded, {len(self.failed_cogs)} failed")
 
     async def on_ready(self) -> None:
+        if self.settings.activity:
+            try:
+                await self._set_presence()
+            except (discord.HTTPException, TypeError):
+                self.log.exception("Failed to set presence")
+
+        if not self.settings.production:
+            self.log.warning("Running on DEVELOPMENT mode")
+
         self.log.info(
             f"Ready as {self.user} ({self.user.id if self.user else '?'}) "
             f"| guilds={len(self.guilds)} "
@@ -126,3 +137,39 @@ class TicketBot(commands.Bot):
         self.log.info("Shutting down")
         await super().close()
         await self.db.close()
+
+    async def _set_presence(self) -> None:
+        activity_cfg = self.settings.activity or {}
+        activity_type_name = str(activity_cfg.get("type", "watching")).lower()
+        activity_types = {
+            "playing": discord.ActivityType.playing,
+            "watching": discord.ActivityType.watching,
+            "listening": discord.ActivityType.listening,
+            "competing": discord.ActivityType.competing,
+            "streaming": discord.ActivityType.streaming,
+            "custom": discord.ActivityType.custom,
+            "unknown": discord.ActivityType.unknown,
+        }
+        activity_type = activity_types.get(activity_type_name, discord.ActivityType.watching)
+
+        kwargs: dict[str, Any] = {
+            "type": activity_type,
+            "name": activity_cfg.get("name", "over HackIT 2026"),
+        }
+        # streaming REQUIRES a url or the API rejects the presence
+        if activity_type is discord.ActivityType.streaming:
+            kwargs["url"] = activity_cfg.get("url", "https://twitch.tv/placeholder")
+        activity = discord.Activity(**kwargs)
+
+        status_name = str(activity_cfg.get("status", "online")).lower()
+        status_map = {
+            "online": discord.Status.online,
+            "idle": discord.Status.idle,
+            "dnd": discord.Status.dnd,
+            "invisible": discord.Status.invisible,
+            "offline": discord.Status.offline,
+        }
+        status = status_map.get(status_name, discord.Status.online)
+
+        await self.change_presence(activity=activity, status=status)
+        self.log.info(f"Presence set: {activity_type_name} {kwargs['name']} (status={status_name})")
