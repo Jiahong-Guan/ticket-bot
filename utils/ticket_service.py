@@ -159,7 +159,7 @@ class TicketService:
                 continue
             channel = guild.get_channel(ticket.channel_id)
             if channel is None:
-                log.warning("Ticket %s has no channel; marking deleted", ticket.id)
+                log.warning(f"Ticket {ticket.id} has no channel; marking deleted")
                 await self.bot.db.modify_ticket(
                     ticket.id,
                     lambda t: replace(t, status=TicketStatus.DELETED, closed_at=utcnow_iso()),
@@ -224,16 +224,20 @@ class TicketService:
                     "The ticket category for this panel no longer exists. "
                     "Ask an admin to run /setup."
                 )
-            number = await self.bot.db.next_ticket_number(guild.id)
+            number = await self.bot.db.peek_ticket_number(guild.id)
             name = self.bot.settings.ticket_format.open.format(number=number)
             guild_settings = await self.bot.db.get_guild(guild.id)
 
+            bot_member = guild.me or guild.get_member(self.bot.user.id)
+            if bot_member is None:
+                bot_member = await guild.fetch_member(self.bot.user.id)
+
             overwrites: dict[
-                discord.Role | discord.Member | discord.Object, discord.PermissionOverwrite
+                discord.Role | discord.Member, discord.PermissionOverwrite
             ] = {
                 guild.default_role: discord.PermissionOverwrite(view_channel=False),
                 owner: _owner_overwrite(),
-                guild.me: discord.PermissionOverwrite(
+                bot_member: discord.PermissionOverwrite(
                     view_channel=True,
                     send_messages=True,
                     manage_channels=True,
@@ -245,10 +249,13 @@ class TicketService:
                 ),
             }
             support = _support_overwrite(self.bot.settings.support_can_manage_messages)
+            support_roles: list[discord.Role] = []
             for role_id in {*panel.support_role_ids, *guild_settings.support_roles}:
                 role = guild.get_role(role_id)
-                if role is not None:
-                    overwrites[role] = support
+                if role is None or role.is_default():
+                    continue
+                overwrites[role] = support
+                support_roles.append(role)
 
             channel = await guild.create_text_channel(
                 name,
@@ -259,12 +266,14 @@ class TicketService:
             )
             try:
                 message = await channel.send(
-                    content=owner.mention,
+                    content=" ".join([owner.mention, *(role.mention for role in support_roles)]),
                     embed=embeds.ticket_created(
                         owner_id=owner.id, panel_name=panel.name, number=number
                     ),
                     view=TicketControlView(self.bot),
-                    allowed_mentions=discord.AllowedMentions(users=[owner]),
+                    allowed_mentions=discord.AllowedMentions(
+                        users=[owner], roles=support_roles
+                    ),
                 )
                 ticket = await self.bot.db.create_ticket(
                     guild_id=guild.id,
@@ -277,13 +286,13 @@ class TicketService:
             except Exception:
                 log.exception("Ticket creation failed after channel creation; cleaning up")
                 with contextlib.suppress(discord.HTTPException):
-                    await channel.delete(reason="Ticket creation failed")
+                    await channel.delete(reason=f"Ticket #{number:04d} creation failed")
                 raise
             try:
                 await message.pin(reason="Ticket controls")
             except discord.HTTPException:
-                log.warning("Could not pin welcome message in %s", channel.id, exc_info=True)
-            log.info("Ticket #%04d created in guild %s by %s", number, guild.id, owner.id)
+                log.warning(f"Could not pin welcome message in {channel.id}", exc_info=True)
+            log.info(f"Ticket #{number:04d} created in guild {guild.id} by {owner.id}")
             return ticket, channel
 
     async def write_transcript(
@@ -325,7 +334,7 @@ class TicketService:
         target_id = panel.transcript_channel_id if panel else guild_settings.transcript_channel
         target = channel.guild.get_channel(target_id) if target_id else None
         if not isinstance(target, discord.TextChannel):
-            log.warning("No usable transcript channel for ticket %s", ticket.id)
+            log.warning(f"No usable transcript channel for ticket {ticket.id}")
             return None
         try:
             sent = await target.send(
@@ -339,7 +348,7 @@ class TicketService:
                 file=discord.File(path, filename=path.name),
             )
         except discord.HTTPException:
-            log.exception("Could not upload transcript for ticket %s", ticket.id)
+            log.exception(f"Could not upload transcript for ticket {ticket.id}")
             return None
         return sent.jump_url
 
@@ -414,7 +423,7 @@ class TicketService:
                 close_reason=reason,
             ),
         )
-        log.info("Ticket %s closed by %s (renamed=%s)", ticket.id, closed_by.id, renamed)
+        log.info(f"Ticket {ticket.id} closed by {closed_by.id} (renamed={renamed})")
         return CloseResult(updated, url, path, count, renamed)
 
     async def close_via_interaction(
