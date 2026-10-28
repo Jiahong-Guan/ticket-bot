@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import os
+import warnings
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
@@ -249,6 +250,20 @@ class Database:
         return await self._run(op)
 
     async def next_ticket_number(self, guild_id: int) -> int:
+        """
+        Temporarily Deprecated Method. Use peek_ticket_number() + create_ticket(number=...) instead
+
+        WARNING: consumes a ticket number immediately. If the caller then fails
+        to create the ticket, the number is permanently burned. Do NOT use this
+        in the ticket-creation path — use peek_ticket_number + create_ticket(number=...)
+        so the bump is atomic with the insert.
+        """
+        warnings.warn(
+            "Use peek_ticket_number() + create_ticket(number=...) instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
         def op() -> int:
             table = self._tables["guilds"]
             cond = Query().guild_id == guild_id
@@ -262,16 +277,23 @@ class Database:
 
         return await self._run(op)
 
+    async def peek_ticket_number(self, guild_id: int) -> int:
+        def op() -> int:
+            doc = self._first("guilds", Query().guild_id == guild_id)
+            return int(doc.get("ticket_counter", 0)) + 1 if doc else 1
+
+        return await self._run(op)
+
     async def create_panel(
-        self,
-        *,
-        guild_id: int,
-        name: str,
-        support_role_ids: list[int],
-        category_id: int,
-        transcript_channel_id: int,
-        panel_channel_id: int,
-        button_label: str = "Create Ticket",
+            self,
+            *,
+            guild_id: int,
+            name: str,
+            support_role_ids: list[int],
+            category_id: int,
+            transcript_channel_id: int,
+            panel_channel_id: int,
+            button_label: str = "Create Ticket",
     ) -> Panel:
         def op() -> Panel:
             table = self._tables["panels"]
@@ -324,16 +346,32 @@ class Database:
         return await self._run(op)
 
     async def create_ticket(
-        self,
-        *,
-        guild_id: int,
-        panel_id: int,
-        channel_id: int,
-        owner_id: int,
-        number: int,
-        control_message_id: int | None = None,
+            self,
+            *,
+            guild_id: int,
+            panel_id: int,
+            channel_id: int,
+            owner_id: int,
+            number: int,
+            control_message_id: int | None = None,
     ) -> Ticket:
         def op() -> Ticket:
+            guilds = self._tables["guilds"]
+            cond = Query().guild_id == guild_id
+            doc = self._first("guilds", cond)
+            current = int(doc.get("ticket_counter", 0)) if doc else 0
+
+            if number != current + 1:
+                raise DatabaseError(
+                    f"Ticket counter mismatch for guild {guild_id}: "
+                    f"expected {current + 1}, got {number}"
+                )
+
+            if doc is None:
+                guilds.insert(GuildSettings(guild_id=guild_id, ticket_counter=number).to_doc())
+            else:
+                guilds.update({"ticket_counter": number}, cond)
+
             table = self._tables["tickets"]
             doc_id = table.insert(
                 {
@@ -377,11 +415,11 @@ class Database:
         return await self._run(op)
 
     async def list_tickets(
-        self,
-        guild_id: int | None = None,
-        *,
-        owner_id: int | None = None,
-        status: TicketStatus | None = None,
+            self,
+            guild_id: int | None = None,
+            *,
+            owner_id: int | None = None,
+            status: TicketStatus | None = None,
     ) -> list[Ticket]:
         def op() -> list[Ticket]:
             rows = self._tables["tickets"].all()
@@ -417,12 +455,12 @@ class Database:
         return cond & (Query().role_id == role_id)
 
     async def set_ticket_member(
-        self,
-        ticket_id: int,
-        *,
-        user_id: int | None = None,
-        role_id: int | None = None,
-        blocked: bool = False,
+            self,
+            ticket_id: int,
+            *,
+            user_id: int | None = None,
+            role_id: int | None = None,
+            blocked: bool = False,
     ) -> TicketMember:
         if (user_id is None) == (role_id is None):
             raise DatabaseError("Provide exactly one of user_id or role_id")
@@ -453,7 +491,7 @@ class Database:
         return await self._run(op)
 
     async def remove_ticket_member(
-        self, ticket_id: int, *, user_id: int | None = None, role_id: int | None = None
+            self, ticket_id: int, *, user_id: int | None = None, role_id: int | None = None
     ) -> bool:
         if (user_id is None) == (role_id is None):
             raise DatabaseError("Provide exactly one of user_id or role_id")

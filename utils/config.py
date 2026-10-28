@@ -130,7 +130,7 @@ class Settings(BaseModel):
                 discord_token=environ.get("DISCORD_TOKEN", ""),
                 log_level=environ.get("LOG_LEVEL", "INFO"),
                 db_path=resolve(environ.get("DB_PATH", "./db")),
-                transcript_path=resolve(environ.get("TRANSCRIPT_PATH", "./assets/transcripts")),
+                transcript_path=resolve(environ.get("TRANSCRIPT_PATH", "./transcripts")),
                 log_path=resolve(environ.get("LOG_PATH", "./logs")),
                 dev_guild_id=file_cfg.dev_guild_id,
                 bot_owner_ids=file_cfg.bot_owner_ids,

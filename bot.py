@@ -115,9 +115,6 @@ class TicketBot(commands.Bot):
             except (discord.HTTPException, TypeError):
                 self.log.exception("Failed to set presence")
 
-        if not self.settings.production:
-            self.log.warning("Running on DEVELOPMENT mode")
-
         self.log.info(
             f"Ready as {self.user} ({self.user.id if self.user else '?'}) "
             f"| guilds={len(self.guilds)} "

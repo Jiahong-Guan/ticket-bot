@@ -37,10 +37,10 @@ async def handle_interaction_error(
     embed: discord.Embed
 
     if isinstance(cause, TicketLimitReached):
-        logger.info("Ticket limit hit by user %s", interaction.user.id)
+        logger.info(f"Ticket limit hit by user {interaction.user.id}")
         embed = embeds.warning(cause.user_message, title=cause.title)
     elif isinstance(cause, BotError):
-        logger.info("%s: %s (user %s)", type(cause).__name__, cause, interaction.user.id)
+        logger.info(f"{type(cause).__name__}: {cause} (user {interaction.user.id})")
         embed = embeds.error(cause.user_message, title=cause.title)
     elif isinstance(cause, app_commands.CommandOnCooldown):
         embed = embeds.warning(f"Slow down. Try again in {cause.retry_after:.1f}s.")
