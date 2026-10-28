@@ -1,0 +1,22 @@
+[Unit]
+Description=Discord Ticket Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/ticket-bot
+EnvironmentFile=/home/pi/ticket-bot/.env
+ExecStart=/home/pi/ticket-bot/.venv/bin/python -u main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/home/pi/ticket-bot
+
+[Install]
+WantedBy=multi-user.target
