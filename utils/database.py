@@ -43,7 +43,7 @@ class _Model:
 
     @classmethod
     def from_doc(cls: type[M], doc: Mapping[str, Any]) -> M:
-        names = (f.name for f in fields(cls))  # type: ignore[arg-type]
+        names = {f.name for f in fields(cls)}  # type: ignore[arg-type]
         data = {k: v for k, v in doc.items() if k in names}
         for name, enum_cls in cls.__enum_fields.items():
             if name in data:
@@ -128,7 +128,14 @@ class AtomicJSONStorage(Storage):
     def write(self, data: dict[str, dict[str, Any]]) -> None:
         tmp = self.path.with_name(self.path.name + ".tmp")
         with tmp.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False)
+            json.dump(
+                data,
+                handle,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ": "),
+                indent=2
+            )
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, self.path)
@@ -264,7 +271,7 @@ class Database:
         category_id: int,
         transcript_channel_id: int,
         panel_channel_id: int,
-        button_label: str = "📩 Create Ticket",
+        button_label: str = "Create Ticket",
     ) -> Panel:
         def op() -> Panel:
             table = self._tables["panels"]
