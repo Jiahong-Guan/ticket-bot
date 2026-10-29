@@ -192,14 +192,47 @@ To gate a new command, add `@is_support()` (or `is_admin`, `is_bot_owner`, `in_t
 ## Project layout
 
 ```text
-bot.py  main.py  config.json  requirements.txt  pytest.ini
-cogs/        base_command.py (BaseCog)  tickets.py  panels.py  admin.py  general.py
-utils/       config  logger  database  checks  embeds  exceptions  error_handler
-             ticket_service  transcript  rate_limit  views/
-db/ logs/ transcripts/  runtime data (git-ignored)
-assets/      banner.png  profile-icon.png
-deploy/      ticket-bot.service  README.md
-tests/       pytest suite
+ticket-bot/
+├── bot.py                     TicketBot, TicketTree and startup wiring
+├── main.py                    Entry point and exit codes
+├── config.json                Bot name, owners, activity, theme, ticket format
+├── requirements.txt
+├── pytest.ini
+├── .env.example
+│
+├── cogs/
+│   ├── base_command.py        BaseCog scaffold (not loaded as a cog)
+│   ├── general.py             /ping /help /debug /id /permissionlevel
+│   ├── panels.py              /setup
+│   ├── admin.py               /admin config add-support-role and friends
+│   └── tickets.py             /add /remove /open /close /delete /rename /claim
+│
+├── utils/
+│   ├── config.py              Settings, FileConfig, EmbedTheme, TicketFormat
+│   ├── logger.py              Rotating file and stdout handlers
+│   ├── database.py            TinyDB persistence layer
+│   ├── checks.py              Permission levels and command decorators
+│   ├── embeds.py              Themed embed builders
+│   ├── exceptions.py          BotError and subclasses
+│   ├── error_handler.py       Central interaction error handler
+│   ├── ticket_service.py      Ticket lifecycle service
+│   ├── transcript.py          HTML transcript renderer
+│   ├── rate_limit.py          Channel edit rate limiter
+│   └── views/
+│       ├── base.py            BaseView and BaseModal
+│       ├── ticket_controls.py Persistent button views and modals
+│       └── panel_wizard.py    Guided /setup wizard
+│
+├── db/                        Runtime JSON state (git-ignored, .gitkeep tracked)
+├── logs/                      bot.log and error.log (git-ignored, .gitkeep tracked)
+├── transcripts/               Generated HTML per guild (git-ignored)
+├── assets/                    banner.png and profile-icon.png
+│
+├── deploy/
+│   ├── ticket-bot.service     Hardened systemd unit
+│   └── README.md              Deploy and hardening guide
+│
+└── tests/                     pytest suite
 ```
 
 ---
