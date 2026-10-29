@@ -1,10 +1,10 @@
 {
-  "bot_name": "Hack N' Flag",
+  "bot_name": "Ticket Bot",
   "dev_guild_id": 1562832771703902260,
   "bot_owner_ids": [877760893356744744],
   "activity": {
-    "type": "watching",
-    "name": "over Hack N' Flag 2026"
+    "type": "playing",
+    "name": "Ticket Bot"
   },
   "embed_theme": {
     "primary": "5865F2",
