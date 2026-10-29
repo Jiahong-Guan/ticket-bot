@@ -1,4 +1,4 @@
-# Deploying on a Raspberry Pi (systemd) — hardened
+# Deploying on a Raspberry Pi (systemd)
 
 Tested on Raspberry Pi OS Bookworm (Python 3.11). Paths assume a dedicated
 service user and project directory; adjust if yours differ.
