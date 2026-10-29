@@ -152,7 +152,7 @@ class TicketBot(commands.Bot):
 
         kwargs: dict[str, Any] = {
             "type": activity_type,
-            "name": activity_cfg.get("name", "over HackIT 2026"),
+            "name": activity_cfg.get("name", "Ticket Bot"),
         }
         # streaming REQUIRES a url or the API rejects the presence
         if activity_type is discord.ActivityType.streaming:
