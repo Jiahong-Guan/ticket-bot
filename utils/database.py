@@ -36,7 +36,7 @@ class TicketStatus(str, Enum):
 
 class _Model:
     __slots__ = ()
-    __enum_fields: ClassVar[dict[str, type[Enum]]] = {}
+    _enum_fields: ClassVar[dict[str, type[Enum]]] = {}
 
     def to_doc(self) -> dict[str, Any]:
         data = asdict(self)  # type: ignore[call-overload]
@@ -46,7 +46,7 @@ class _Model:
     def from_doc(cls: type[M], doc: Mapping[str, Any]) -> M:
         names = {f.name for f in fields(cls)}  # type: ignore[arg-type]
         data = {k: v for k, v in doc.items() if k in names}
-        for name, enum_cls in cls.__enum_fields.items():
+        for name, enum_cls in cls._enum_fields.items():
             if name in data:
                 data[name] = enum_cls(data[name])
         return cls(**data)
