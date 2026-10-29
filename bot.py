@@ -35,10 +35,11 @@ class TicketTree(app_commands.CommandTree[Any]):
 class TicketBot(commands.Bot):
     def __init__(self, settings: Settings) -> None:
         intents = discord.Intents.default()
-        intents.guilds = True  # privileged: resolve ticket participants
-        intents.members = True  # privileged: needed so transcripts contain text
+        intents.guilds = True
+        intents.members = True  # privileged: resolve ticket participants
+        intents.message_content = True  # privileged: needed so transcripts contain text
         super().__init__(
-            command_prefix=commands.when_mentioned,  # type: ignore[arg-type]
+            command_prefix=commands.when_mentioned_or("t!"),  # type: ignore[arg-type]
             intents=intents,
             help_command=None,
             tree_cls=TicketTree,
