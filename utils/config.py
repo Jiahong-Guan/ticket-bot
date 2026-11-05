@@ -69,6 +69,7 @@ class FileConfig(BaseModel):
     ticket_format: TicketFormat
     max_open_tickets_per_user: int = Field(ge=1, le=25)
     support_can_manage_messages: bool = True
+    closed_category_safe_limit: int = Field(default=45, ge=1, le=49)
 
 
 class Settings(BaseModel):
@@ -87,6 +88,7 @@ class Settings(BaseModel):
     ticket_format: TicketFormat
     max_open_tickets_per_user: int
     support_can_manage_messages: bool
+    closed_category_safe_limit: int = 45
 
     @field_validator("discord_token")
     @classmethod
@@ -139,6 +141,7 @@ class Settings(BaseModel):
                 ticket_format=file_cfg.ticket_format,
                 max_open_tickets_per_user=file_cfg.max_open_tickets_per_user,
                 support_can_manage_messages=file_cfg.support_can_manage_messages,
+                closed_category_safe_limit=file_cfg.closed_category_safe_limit,
             )
         except ValidationError as exc:
             problems = "; ".join(
