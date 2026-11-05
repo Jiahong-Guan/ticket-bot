@@ -93,6 +93,8 @@ class TicketsCog(BaseCog):
         interaction: discord.Interaction,
         reason: app_commands.Range[str, 1, 500] | None = None,
     ) -> None:
+        if interaction.response.is_done():
+            return
         row, _ = await self.resolve_ticket(interaction)
         await interaction.response.defer()
         await self.bot.tickets.close_via_interaction(interaction, row, reason)

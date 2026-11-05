@@ -90,7 +90,8 @@ class CloseTicketModal(BaseModal):
         super().__init__(bot, title="Close ticket")
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        """Close the ticket with the entered reason."""
+        if interaction.response.is_done():
+            return
         ticket, _ = await load_ticket_context(interaction)
         await interaction.response.defer()
         await self.bot.tickets.close_via_interaction(

@@ -16,5 +16,6 @@
     "open": "ticket-{number:04d}",
     "closed": "closed-{number:04d}"
   },
-  "max_open_tickets_per_user": 1
+  "max_open_tickets_per_user": 1,
+  "closed_category_safe_limit": 45
 }

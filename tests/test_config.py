@@ -102,3 +102,20 @@ def test_bad_log_level(tmp_path: Path, config_file: Path) -> None:
 
 def test_log_level_is_normalised(tmp_path: Path, config_file: Path) -> None:
     assert load(config_file, tmp_path, LOG_LEVEL="debug").log_level == "DEBUG"
+
+
+def test_closed_category_safe_limit_defaults_to_45(settings: Settings) -> None:
+    assert settings.closed_category_safe_limit == 45
+
+
+def test_closed_category_safe_limit_is_configurable(tmp_path: Path) -> None:
+    path = write(tmp_path, {**VALID_CONFIG, "closed_category_safe_limit": 30})
+    assert load(path, tmp_path).closed_category_safe_limit == 30
+
+
+@pytest.mark.parametrize("limit", [0, 50, -1])
+def test_closed_category_safe_limit_must_stay_below_discords_cap(
+    tmp_path: Path, limit: int
+) -> None:
+    with pytest.raises(ConfigurationError):
+        load(write(tmp_path, {**VALID_CONFIG, "closed_category_safe_limit": limit}), tmp_path)

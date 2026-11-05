@@ -34,6 +34,8 @@ log = get_logger("tickets.service")
 _NAME_CLEAN = re.compile(r"[^a-z0-9_-]+")
 _EDIT_TIMEOUT_SECONDS = 15.0
 _MAX_EMBED_TEXT = 200
+# Oldest-first pruning tries at most this many candidates before giving up for this close.
+_MAX_PRUNE_ATTEMPTS = 3
 
 
 def sanitize_channel_name(raw: str) -> str:
@@ -47,6 +49,14 @@ def sanitize_channel_name(raw: str) -> str:
 def _write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _closed_sort_key(ticket: Ticket, channel: discord.abc.GuildChannel) -> datetime:
+    """Stored close time when present, else the channel creation time."""
+    if ticket.closed_at:
+        with contextlib.suppress(ValueError):
+            return datetime.fromisoformat(ticket.closed_at)
+    return channel.created_at
 
 
 def _owner_overwrite() -> discord.PermissionOverwrite:
@@ -136,10 +146,18 @@ class TicketService:
     def __init__(self, bot: TicketBot) -> None:
         self.bot = bot
         self._guild_locks: dict[int, asyncio.Lock] = {}
+        # Channel ids with a close in flight. Check-and-add has no await between them, so on
+        # the single event loop only one caller can claim a channel.
+        self._closing: set[int] = set()
+        # Serialises "prune the archive, then move in" so two closes cannot both prune.
+        self._archive_locks: dict[int, asyncio.Lock] = {}
         self._edit_limiter = ChannelEditLimiter()
 
     def _lock_for(self, guild_id: int) -> asyncio.Lock:
         return self._guild_locks.setdefault(guild_id, asyncio.Lock())
+
+    def _archive_lock_for(self, guild_id: int) -> asyncio.Lock:
+        return self._archive_locks.setdefault(guild_id, asyncio.Lock())
 
     def _open_name(self, ticket: Ticket) -> str:
         return ticket.custom_name or self.bot.settings.ticket_format.open.format(
@@ -367,8 +385,13 @@ class TicketService:
         transcript is written and uploaded. Last, the channel is renamed and moved; the rename is
         budgeted and skipped if Discord would rate limit it.
 
+        Idempotent: a second close of the same channel while one is running is refused, and the
+        ticket is re-read from the database once the channel is claimed, so a stale ``ticket``
+        object cannot start a second close.
+
         Raises:
-            TicketStateError: If the ticket is not open.
+            TicketStateError: If the ticket is not open, is already being closed, or its
+                channel no longer exists.
             PermissionDenied: If ``closed_by`` is neither the owner nor support.
         """
         if ticket.status != TicketStatus.OPEN:
@@ -378,6 +401,33 @@ class TicketService:
         ):
             raise PermissionDenied("Only the ticket owner or support can close this ticket.")
 
+        if channel.id in self._closing:
+            raise TicketStateError("This ticket is already being closed.")
+        self._closing.add(channel.id)
+        try:
+            current = await self.bot.db.get_ticket(ticket.id)
+            if current is None or current.status != TicketStatus.OPEN:
+                raise TicketStateError("This ticket is already closed.")
+            return await self._close_claimed(channel, current, closed_by, reason)
+        except discord.NotFound:
+            log.warning(f"Channel {channel.id} of ticket {ticket.id} vanished mid-close")
+            await self.bot.db.modify_ticket(
+                ticket.id,
+                lambda t: replace(
+                    t, status=TicketStatus.DELETED, closed_at=t.closed_at or utcnow_iso()
+                ),
+            )
+            raise TicketStateError("This ticket's channel no longer exists.") from None
+        finally:
+            self._closing.discard(channel.id)
+
+    async def _close_claimed(
+        self,
+        channel: discord.TextChannel,
+        ticket: Ticket,
+        closed_by: discord.Member,
+        reason: str | None,
+    ) -> CloseResult:
         guild = channel.guild
         panel = await self.bot.db.get_panel(ticket.panel_id)
         original = dict(channel.overwrites)
@@ -404,14 +454,30 @@ class TicketService:
         target_category = (
             closed_category if isinstance(closed_category, discord.CategoryChannel) else None
         )
-        renamed = await self._guarded_edit(
-            channel,
-            name=self.bot.settings.ticket_format.closed.format(number=ticket.number),
-            category=target_category or channel.category,
-            reason=f"Ticket closed by {closed_by} ({closed_by.id})",
-        )
-        if not renamed and target_category is not None:
-            await channel.edit(category=target_category, reason="Moving closed ticket")
+        async with self._archive_lock_for(guild.id):
+            if target_category is not None:
+                await self._prune_archive(target_category, keep_channel_id=channel.id)
+            renamed = False
+            try:
+                renamed = await self._guarded_edit(
+                    channel,
+                    name=self.bot.settings.ticket_format.closed.format(number=ticket.number),
+                    category=target_category or channel.category,
+                    reason=f"Ticket closed by {closed_by} ({closed_by.id})",
+                )
+            except discord.NotFound:
+                raise
+            except discord.HTTPException:
+                # Typically a full archive category. The ticket is already locked and
+                # transcribed, so finish the close instead of leaving it half done.
+                log.exception(f"Could not rename or move closed ticket {ticket.id}")
+            if not renamed and target_category is not None:
+                try:
+                    await channel.edit(category=target_category, reason="Moving closed ticket")
+                except discord.NotFound:
+                    raise
+                except discord.HTTPException:
+                    log.exception(f"Could not move closed ticket {ticket.id} to the archive")
 
         updated = await self.bot.db.modify_ticket(
             ticket.id,
@@ -425,6 +491,87 @@ class TicketService:
         )
         log.info(f"Ticket {ticket.id} closed by {closed_by.id} (renamed={renamed})")
         return CloseResult(updated, url, path, count, renamed)
+
+    async def _prune_archive(
+        self, category: discord.CategoryChannel, *, keep_channel_id: int
+    ) -> None:
+        """
+        Make room in the archive by deleting its oldest closed ticket (at most one per close).
+
+        The caller must hold the archive lock. Only channels that map to a closed ticket in
+        the database are candidates, so unrelated channels staff keep in the category are never
+        touched. Never raises: a failed prune must not block the close.
+        """
+        try:
+            channels = list(category.text_channels)
+            if len(channels) < self.bot.settings.closed_category_safe_limit:
+                return
+            closed = {
+                t.channel_id: t
+                for t in await self.bot.db.list_tickets(
+                    category.guild.id, status=TicketStatus.CLOSED
+                )
+            }
+            candidates = sorted(
+                ((closed[c.id], c) for c in channels if c.id in closed and c.id != keep_channel_id),
+                key=lambda pair: _closed_sort_key(*pair),
+            )
+            if not candidates:
+                log.warning(f"Archive {category.id} is full but holds no prunable ticket")
+                return
+            for victim_ticket, victim_channel in candidates[:_MAX_PRUNE_ATTEMPTS]:
+                try:
+                    await self._remove_ticket_channel(
+                        victim_channel,
+                        victim_ticket,
+                        reason="Archive full: pruning the oldest closed ticket",
+                        ensure_transcript=True,
+                    )
+                except Exception:
+                    log.exception(f"Could not prune ticket {victim_ticket.id}")
+                    continue
+                log.info(f"Pruned ticket {victim_ticket.id} from archive {category.id}")
+                return
+        except Exception:
+            log.exception("Archive pruning failed; continuing with the close")
+
+    async def _ensure_transcript(self, channel: discord.TextChannel, ticket: Ticket) -> None:
+        """Guarantee a transcript file exists on disk, regenerating it if it went missing."""
+        if ticket.transcript_path and await asyncio.to_thread(
+            Path(ticket.transcript_path).is_file
+        ):
+            return
+        path, _ = await self.write_transcript(channel, ticket)
+        await self.bot.db.modify_ticket(
+            ticket.id, lambda t: replace(t, transcript_path=str(path))
+        )
+
+    async def _remove_ticket_channel(
+        self,
+        channel: discord.TextChannel,
+        ticket: Ticket,
+        *,
+        reason: str,
+        ensure_transcript: bool = False,
+    ) -> None:
+        """
+        Shared by ``delete_ticket`` and the archive pruner: optional transcript, then delete.
+
+        The transcript step finishes before ``channel.delete`` runs, and a transcript failure
+        aborts the delete. An already-deleted channel still gets the database row marked.
+        """
+        if ensure_transcript:
+            await self._ensure_transcript(channel, ticket)
+        try:
+            await channel.delete(reason=reason)
+        except discord.NotFound:
+            log.info(f"Channel {channel.id} of ticket {ticket.id} was already gone")
+        await self.bot.db.modify_ticket(
+            ticket.id,
+            lambda t: replace(
+                t, status=TicketStatus.DELETED, closed_at=t.closed_at or utcnow_iso()
+            ),
+        )
 
     async def close_via_interaction(
         self, interaction: discord.Interaction, ticket: Ticket, reason: str | None
@@ -493,12 +640,8 @@ class TicketService:
     ) -> None:
         if not await has_support_access(self.bot, deleted_by, ticket):
             raise PermissionDenied("Only support staff can delete tickets.")
-        await channel.delete(reason=f"Ticket deleted by {deleted_by} ({deleted_by.id})")
-        await self.bot.db.modify_ticket(
-            ticket.id,
-            lambda t: replace(
-                t, status=TicketStatus.DELETED, closed_at=t.closed_at or utcnow_iso()
-            ),
+        await self._remove_ticket_channel(
+            channel, ticket, reason=f"Ticket deleted by {deleted_by} ({deleted_by.id})"
         )
         log.info(f"Ticket {ticket.id} deleted by {deleted_by.id}")
 

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -790,3 +793,270 @@ async def test_close_reply_rejects_non_text_channels(service: TicketService, db:
     inter.channel = MagicMock(spec=discord.Thread)
     with pytest.raises(TicketStateError):
         await service.close_via_interaction(inter, ticket, None)
+
+
+def http_error(exc: type[discord.HTTPException], status: int) -> discord.HTTPException:
+    return exc(
+        response=SimpleNamespace(status=status, reason="x"),  # type: ignore[arg-type]
+        message="x",
+    )
+
+
+async def archive_env(
+    service: TicketService,
+    db: Database,
+    tmp_path: Path,
+    *,
+    archived: int,
+    with_transcripts: bool = True,
+    track_tickets: bool = True,
+) -> tuple[MagicMock, MagicMock, Ticket, Database, list[MagicMock]]:
+    owner = make_member(5)
+    ticket = await open_ticket(db, owner=5)
+    channel, guild, _ = make_close_env(owner=owner, closed_category=True)
+    await db.upsert_guild(
+        GuildSettings(guild_id=1, support_roles=[SUPPORT_ROLE], closed_category=77)
+    )
+    panel_id = ticket.panel_id
+    base = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    victims: list[MagicMock] = []
+    for i in range(archived):
+        victim = make_channel(2000 + i, guild)
+        victim.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        victim.delete = AsyncMock()
+        victim.history = MagicMock(return_value=async_iter([make_message("old")]))
+        victims.append(victim)
+        if not track_tickets:
+            continue
+        row = await db.create_ticket(
+            guild_id=1, panel_id=panel_id, channel_id=victim.id, owner_id=6, number=i + 2
+        )
+        transcript = tmp_path / f"old-{i}.html"
+        if with_transcripts:
+            transcript.write_text("<html></html>", encoding="utf-8")
+        await db.modify_ticket(
+            row.id,
+            lambda t, i=i, transcript=transcript, base=base: replace(
+                t,
+                status=TicketStatus.CLOSED,
+                closed_at=(base + timedelta(hours=i)).isoformat(),
+                transcript_path=str(transcript),
+            ),
+        )
+    guild.closed_cat.id = 77
+    guild.closed_cat.guild = guild
+    guild.closed_cat.text_channels = list(reversed(victims))
+    return channel, guild, ticket, db, victims
+
+
+async def status_of(db: Database, channel_id: int) -> TicketStatus:
+    row = next(t for t in await db.list_tickets(1) if t.channel_id == channel_id)
+    return row.status
+
+
+@pytest.mark.asyncio
+async def test_double_close_runs_once(
+    service: TicketService, db: Database, tmp_path: Path
+) -> None:
+    ticket = await open_ticket(db, owner=5)
+    owner = make_member(5)
+    channel, _, _ = make_close_env(owner=owner)
+    real = service.write_transcript
+    calls: list[int] = []
+
+    async def slow(ch: MagicMock, t: Ticket) -> tuple[Path, int]:
+        calls.append(t.id)
+        await asyncio.sleep(0.05)  # hold the first close open so the second overlaps it
+        return await real(ch, t)
+
+    service.write_transcript = slow  # type: ignore[method-assign]
+    results = await asyncio.gather(
+        service.close_ticket(channel, ticket, owner, None),
+        service.close_ticket(channel, ticket, owner, None),
+        return_exceptions=True,
+    )
+    assert sum(not isinstance(r, Exception) for r in results) == 1
+    refused = [r for r in results if isinstance(r, TicketStateError)]
+    assert len(refused) == 1
+    assert "already being closed" in refused[0].user_message
+    assert calls == [ticket.id]  # one transcript, not two
+    assert service._closing == set()
+
+
+@pytest.mark.asyncio
+async def test_close_lock_is_released_after_a_failure(
+    service: TicketService, db: Database
+) -> None:
+    ticket = await open_ticket(db, owner=5)
+    owner = make_member(5)
+    channel, _, _ = make_close_env(owner=owner)
+    real = service.write_transcript
+    service.write_transcript = AsyncMock(side_effect=RuntimeError("disk full"))  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        await service.close_ticket(channel, ticket, owner, None)
+    assert service._closing == set()
+    service.write_transcript = real  # type: ignore[method-assign]
+    channel.history = MagicMock(return_value=async_iter([make_message("hello")]))
+    result = await service.close_ticket(channel, ticket, owner, None)  # retry succeeds
+    assert result.ticket.status is TicketStatus.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_stale_ticket_object_cannot_start_a_second_close(
+    service: TicketService, db: Database
+) -> None:
+    stale = await open_ticket(db, owner=5)
+    await db.modify_ticket(stale.id, lambda t: replace(t, status=TicketStatus.CLOSED))
+    channel, _, _ = make_close_env()
+    with pytest.raises(TicketStateError, match="already closed"):
+        await service.close_ticket(channel, stale, make_member(5), None)  # stale says OPEN
+    channel.edit.assert_not_awaited()
+    assert service._closing == set()
+
+
+@pytest.mark.asyncio
+async def test_close_of_a_vanished_channel_is_graceful(
+    service: TicketService, db: Database
+) -> None:
+    ticket = await open_ticket(db, owner=5)
+    owner = make_member(5)
+    channel, _, _ = make_close_env(owner=owner)
+    channel.edit = AsyncMock(side_effect=http_error(discord.NotFound, 404))
+    with pytest.raises(TicketStateError, match="no longer exists"):
+        await service.close_ticket(channel, ticket, owner, None)
+    assert (await db.get_ticket(ticket.id)).status is TicketStatus.DELETED  # type: ignore[union-attr]
+    assert service._closing == set()
+
+
+@pytest.mark.asyncio
+async def test_no_prune_below_the_safe_limit(
+    service: TicketService, db: Database, tmp_path: Path
+) -> None:
+    channel, guild, ticket, _, victims = await archive_env(service, db, tmp_path, archived=44)
+    result = await service.close_ticket(channel, ticket, make_member(5), None)
+    assert result.ticket.status is TicketStatus.CLOSED
+    assert all(v.delete.await_count == 0 for v in victims)
+    assert channel.edit.await_args_list[-1].kwargs["category"] is guild.closed_cat
+
+
+@pytest.mark.asyncio
+async def test_prune_at_the_limit_deletes_only_the_oldest_then_moves_in(
+    service: TicketService, db: Database, tmp_path: Path
+) -> None:
+    channel, guild, ticket, _, victims = await archive_env(service, db, tmp_path, archived=45)
+    result = await service.close_ticket(channel, ticket, make_member(5), None)
+    assert result.ticket.status is TicketStatus.CLOSED
+    victims[0].delete.assert_awaited_once()
+    assert all(v.delete.await_count == 0 for v in victims[1:])
+    assert await status_of(db, victims[0].id) is TicketStatus.DELETED
+    assert await status_of(db, victims[1].id) is TicketStatus.CLOSED
+    assert channel.edit.await_args_list[-1].kwargs["category"] is guild.closed_cat
+
+
+@pytest.mark.asyncio
+async def test_prune_regenerates_a_missing_transcript_before_deleting(
+    service: TicketService, db: Database, tmp_path: Path
+) -> None:
+    channel, _, ticket, _, victims = await archive_env(
+        service, db, tmp_path, archived=45, with_transcripts=False
+    )
+    order: list[str] = []
+    real = service.write_transcript
+
+    async def spy(ch: MagicMock, t: Ticket) -> tuple[Path, int]:
+        order.append(f"transcript:{ch.id}")
+        return await real(ch, t)
+
+    service.write_transcript = spy  # type: ignore[method-assign]
+    victims[0].delete = AsyncMock(side_effect=lambda **_: order.append("delete:2000"))
+    await service.close_ticket(channel, ticket, make_member(5), None)
+    assert order.index("transcript:2000") < order.index("delete:2000")
+    row = next(t for t in await db.list_tickets(1) if t.channel_id == 2000)
+    assert row.transcript_path is not None and Path(row.transcript_path).is_file()
+
+
+@pytest.mark.asyncio
+async def test_prune_skips_a_victim_whose_transcript_cannot_be_saved(
+    service: TicketService, db: Database, tmp_path: Path
+) -> None:
+    channel, _, ticket, _, victims = await archive_env(
+        service, db, tmp_path, archived=45, with_transcripts=False
+    )
+    victims[0].history = MagicMock(side_effect=RuntimeError("cannot read history"))
+    result = await service.close_ticket(channel, ticket, make_member(5), None)
+    assert result.ticket.status is TicketStatus.CLOSED
+    victims[0].delete.assert_not_awaited()  # never deleted without a transcript
+    assert await status_of(db, victims[0].id) is TicketStatus.CLOSED
+    victims[1].delete.assert_awaited_once()  # next oldest made the room instead
+
+
+@pytest.mark.asyncio
+async def test_failed_prune_never_blocks_the_close(
+    service: TicketService, db: Database, tmp_path: Path
+) -> None:
+    channel, guild, ticket, _, victims = await archive_env(service, db, tmp_path, archived=45)
+    for v in victims:
+        v.delete = AsyncMock(side_effect=http_error(discord.Forbidden, 403))
+    result = await service.close_ticket(channel, ticket, make_member(5), None)
+    assert result.ticket.status is TicketStatus.CLOSED
+    assert channel.edit.await_args_list[-1].kwargs["category"] is guild.closed_cat
+    assert await status_of(db, victims[0].id) is TicketStatus.CLOSED  # DB not marked deleted
+    assert sum(v.delete.await_count for v in victims) == 3  # bounded retries
+
+
+@pytest.mark.asyncio
+async def test_full_archive_move_failure_still_finishes_the_close(
+    service: TicketService, db: Database, tmp_path: Path
+) -> None:
+    channel, _, ticket, _, victims = await archive_env(service, db, tmp_path, archived=45)
+    for v in victims:
+        v.delete = AsyncMock(side_effect=http_error(discord.Forbidden, 403))
+    channel.edit = AsyncMock(
+        side_effect=[None, http_error(discord.HTTPException, 400), http_error(discord.HTTPException, 400)]
+    )
+    result = await service.close_ticket(channel, ticket, make_member(5), None)
+    assert result.ticket.status is TicketStatus.CLOSED  # DB consistent despite the failed move
+
+
+@pytest.mark.asyncio
+async def test_unrelated_channels_in_the_archive_are_never_pruned(
+    service: TicketService, db: Database, tmp_path: Path
+) -> None:
+    channel, _, ticket, _, strangers = await archive_env(
+        service, db, tmp_path, archived=45, track_tickets=False
+    )
+    result = await service.close_ticket(channel, ticket, make_member(5), None)
+    assert result.ticket.status is TicketStatus.CLOSED
+    assert all(c.delete.await_count == 0 for c in strangers)
+
+
+@pytest.mark.asyncio
+async def test_double_close_on_a_full_archive_prunes_exactly_once(
+    service: TicketService, db: Database, tmp_path: Path
+) -> None:
+    channel, _, ticket, _, victims = await archive_env(service, db, tmp_path, archived=45)
+    owner = make_member(5)
+    real = service.write_transcript
+
+    async def slow(ch: MagicMock, t: Ticket) -> tuple[Path, int]:
+        await asyncio.sleep(0.05)
+        return await real(ch, t)
+
+    service.write_transcript = slow  # type: ignore[method-assign]
+    await asyncio.gather(
+        service.close_ticket(channel, ticket, owner, None),
+        service.close_ticket(channel, ticket, owner, None),
+        return_exceptions=True,
+    )
+    assert sum(v.delete.await_count for v in victims) == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_of_an_already_deleted_channel_still_marks_the_row(
+    service: TicketService, db: Database
+) -> None:
+    ticket = await open_ticket(db)
+    channel = make_channel()
+    channel.delete = AsyncMock(side_effect=http_error(discord.NotFound, 404))
+    await service.delete_ticket(channel, ticket, make_member(10, roles=(SUPPORT_ROLE,)))
+    assert (await db.get_ticket(ticket.id)).status is TicketStatus.DELETED  # type: ignore[union-attr]
